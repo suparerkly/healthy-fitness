@@ -1,0 +1,15 @@
+{
+  "name": "Healthy Zoo · แคล โปรตีน ออกกำลัง",
+  "short_name": "Healthy Zoo",
+  "description": "คำนวณแคลอรี่ โปรตีน และโปรแกรมออกกำลังกายกับสัตว์คู่หู",
+  "lang": "th",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFF4E4",
+  "theme_color": "#FFF4E4",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
