@@ -19,11 +19,26 @@ export const ACTIVITY_LEVELS = [
   { id: 'active', factor: 1.725, label: 'หนัก', desc: 'ออกกำลัง 6–7 วัน/สัปดาห์', emoji: '🐆' },
 ];
 
-export const GOALS = [
-  { id: 'lose', label: 'ลดไขมัน', kcalDelta: -500, proteinPerKg: 1.8, emoji: '🔥' },
-  { id: 'maintain', label: 'รักษาน้ำหนัก', kcalDelta: 0, proteinPerKg: 1.4, emoji: '⚖️' },
-  { id: 'gain', label: 'เพิ่มกล้าม', kcalDelta: 300, proteinPerKg: 2.0, emoji: '💪' },
+// เป้าหมายแบ่งเป็นกลุ่มและระดับ: kcalDelta = ปรับจาก TDEE, proteinPerKg = โปรตีนกรัมต่อน้ำหนักตัว 1 กก.
+export const GOAL_GROUPS = [
+  { id: 'lose', label: 'ลดไขมัน', emoji: '🔥' },
+  { id: 'keep', label: 'รักษา / ปรับรูปร่าง', emoji: '⚖️' },
+  { id: 'gain', label: 'เพิ่มกล้าม', emoji: '💪' },
 ];
+
+export const GOALS = [
+  { id: 'lose1', group: 'lose', level: 1, label: 'ลดไขมัน ระดับ 1', short: 'ระดับ 1', kcalDelta: -250, proteinPerKg: 1.8, emoji: '🔥', desc: 'ลดช้าแต่ยั่งยืน หิวน้อย รักษากล้ามได้ดี' },
+  { id: 'lose2', group: 'lose', level: 2, label: 'ลดไขมัน ระดับ 2', short: 'ระดับ 2', kcalDelta: -500, proteinPerKg: 2.0, emoji: '🔥', desc: 'สมดุล เป็นแบบที่นิยมที่สุด' },
+  { id: 'lose3', group: 'lose', level: 3, label: 'ลดไขมัน ระดับ 3', short: 'ระดับ 3', kcalDelta: -750, proteinPerKg: 2.2, emoji: '🔥', desc: 'ลดเร็ว ต้องมีวินัยสูง ไม่ควรทำนานเกิน 8–12 สัปดาห์' },
+  { id: 'maintain', group: 'keep', level: 0, label: 'รักษาน้ำหนัก', short: 'รักษาน้ำหนัก', kcalDelta: 0, proteinPerKg: 1.6, emoji: '⚖️', desc: 'คงน้ำหนักและรูปร่างปัจจุบัน' },
+  { id: 'recomp', group: 'keep', level: 0, label: 'ลดไขมัน + สร้างกล้าม', short: 'Recomp', kcalDelta: -150, proteinPerKg: 2.2, emoji: '🔄', desc: 'กินใกล้เคียง TDEE โปรตีนสูง ต้องเล่นเวทสม่ำเสมอ' },
+  { id: 'gain1', group: 'gain', level: 1, label: 'เพิ่มกล้าม ระดับ 1', short: 'ระดับ 1', kcalDelta: 250, proteinPerKg: 1.8, emoji: '💪', desc: 'Lean bulk ไขมันขึ้นน้อย เหมาะกับคนส่วนใหญ่' },
+  { id: 'gain2', group: 'gain', level: 2, label: 'เพิ่มกล้าม ระดับ 2', short: 'ระดับ 2', kcalDelta: 400, proteinPerKg: 2.0, emoji: '💪', desc: 'เพิ่มกล้ามมาตรฐาน น้ำหนักขึ้นต่อเนื่อง' },
+  { id: 'gain3', group: 'gain', level: 3, label: 'เพิ่มกล้าม ระดับ 3', short: 'ระดับ 3', kcalDelta: 600, proteinPerKg: 2.2, emoji: '💪', desc: 'เพิ่มเร็ว เหมาะกับคนผอมมาก หรือน้ำหนักขึ้นยาก' },
+];
+
+// รหัสเป้าหมายจากเวอร์ชันก่อน
+export const GOAL_ALIASES = { lose: 'lose2', gain: 'gain1' };
 
 export const MEALS = [
   { id: 'breakfast', label: 'มื้อเช้า', emoji: '🐓' },
