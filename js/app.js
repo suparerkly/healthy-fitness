@@ -2,6 +2,10 @@ import {
   BUDDIES, ACTIVITY_LEVELS, GOALS, MEALS, FOOD_CATEGORIES, FOODS,
   PROGRAMS, PROGRAM_TAGS, LEVEL_LABELS, QUICK_ACTIVITIES,
 } from './data.js';
+import {
+  watchAuth, login, register, logout, loadUserData, saveMeta, saveDay, saveDays, deleteDays,
+  authErrorMessage, normalizeUsername, usernameFromEmail, USERNAME_RE,
+} from './firebase.js';
 
 /* =========================================================
    Utilities
@@ -26,19 +30,42 @@ function dateLabel(k) {
 const mmss = (sec) => `${Math.floor(sec / 60)}:${pad(Math.max(0, Math.floor(sec % 60)))}`;
 
 /* =========================================================
-   Storage
+   Storage (Firebase)
    ========================================================= */
-const STORE_KEY = 'healthyzoo.v1';
-function loadDB() {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; }
+// ข้อมูลเวอร์ชันก่อนที่เคยเก็บไว้ในเครื่อง จะถูกย้ายขึ้นบัญชีตอนสมัครครั้งแรก
+const LEGACY_KEY = 'healthyzoo.v1';
+const defaultSettings = () => ({ countBurned: true, sound: true });
+const freshDB = () => ({ profile: null, days: {}, customFoods: [], recent: [], settings: defaultSettings() });
+const db = freshDB();
+let currentUser = null; // { uid, username }
+
+// รวมการบันทึกที่เกิดติดกันไว้ แล้วส่งขึ้น Firestore ทีเดียว
+const pending = { meta: false, days: new Set() };
+let syncTimer = null;
+function save({ meta = false, days = [] } = {}) {
+  if (meta) pending.meta = true;
+  days.forEach((k) => pending.days.add(k));
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(flushSync, 400);
 }
-const db = Object.assign(
-  { profile: null, days: {}, customFoods: [], recent: [], settings: { countBurned: true, sound: true } },
-  loadDB(),
-);
-db.settings = Object.assign({ countBurned: true, sound: true }, db.settings);
-function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch { toast('บันทึกไม่สำเร็จ พื้นที่เก็บข้อมูลเต็ม'); }
+function flushSync() {
+  clearTimeout(syncTimer);
+  if (!currentUser) return Promise.resolve();
+  const { uid, username } = currentUser;
+  const jobs = [];
+  if (pending.meta) jobs.push(saveMeta(uid, username, db));
+  for (const k of pending.days) jobs.push(saveDay(uid, k, getDay(k)));
+  pending.meta = false;
+  pending.days.clear();
+  return Promise.all(jobs).catch((err) => { console.error(err); toast(`บันทึกขึ้น cloud ไม่สำเร็จ: ${authErrorMessage(err)}`); });
+}
+
+function readLegacy() {
+  try {
+    const old = JSON.parse(localStorage.getItem(LEGACY_KEY));
+    if (old && (Object.keys(old.days || {}).length || (old.customFoods || []).length)) return old;
+  } catch { /* ไม่มีข้อมูลเก่า */ }
+  return null;
 }
 
 const emptyDay = () => ({ meals: { breakfast: [], lunch: [], dinner: [], snack: [] }, workouts: [] });
@@ -61,6 +88,9 @@ const ui = {
   progTag: 'all',
   form: null,
   session: null,
+  booting: true, // รอ Firebase บอกสถานะล็อกอิน
+  busy: false, // กำลังรอ Firebase (ล็อกอิน/สมัคร)
+  registering: false,
 };
 
 /* =========================================================
@@ -366,6 +396,7 @@ function viewMe() {
     <div class="buddy" aria-hidden="true">${bd.emoji}</div>
     <div class="grow">
       <h3>${esc(p.name || 'นักสู้สายสุขภาพ')}</h3>
+      <div class="small" style="color:var(--fox)">@${esc(currentUser?.username || '')}</div>
       <div class="small muted">${p.sex === 'm' ? 'ชาย' : 'หญิง'} · ${p.age} ปี · ${p.weight} กก. · ${p.height} ซม.</div>
       <div class="small muted">${tg.act.emoji} ${tg.act.label} · ${tg.goal.emoji} ${tg.goal.label}</div>
     </div>
@@ -412,17 +443,53 @@ function viewMe() {
       <span class="switch"><input type="checkbox" data-setting="sound" ${db.settings.sound ? 'checked' : ''}><span></span></span></label>
   </section>
 
-  <button class="btn ghost block" data-act="reset-ask" style="color:var(--berry)">ล้างข้อมูลทั้งหมด</button>
-  <p class="tiny muted center">ข้อมูลทั้งหมดเก็บไว้ในเครื่องนี้เท่านั้น · ค่าโภชนาการและแคลที่เผาผลาญเป็นค่าประมาณ</p>`;
+  <button class="btn ghost block" data-act="logout">🚪 ออกจากระบบ</button>
+  <button class="btn ghost block" data-act="reset-ask" style="color:var(--berry)">ลบบันทึกอาหารและการออกกำลังทั้งหมด</button>
+  <p class="tiny muted center">☁️ ข้อมูลเก็บใน Firebase ผูกกับบัญชี @${esc(currentUser?.username || '')} · ค่าโภชนาการและแคลที่เผาผลาญเป็นค่าประมาณ</p>`;
 }
 
 /* =========================================================
    Screens: Onboarding / edit profile
    ========================================================= */
-function defaultForm() {
-  return db.profile
-    ? { ...db.profile, step: 1, editing: true }
-    : { name: '', buddy: 'panda', sex: 'm', age: '', weight: '', height: '', activity: 'moderate', goal: 'lose', step: 1, editing: false };
+// mode: 'register' = สมัครสมาชิก, 'setup' = ล็อกอินแล้วแต่ยังไม่มีโปรไฟล์, 'edit' = แก้ไขโปรไฟล์
+function defaultForm(mode) {
+  if (mode === 'edit') return { ...db.profile, step: 1, mode, editing: true };
+  return {
+    username: '', password: '', password2: '',
+    name: '', buddy: 'panda', sex: 'm', age: '', weight: '', height: '', activity: 'moderate', goal: 'lose',
+    step: 1, mode, editing: false,
+  };
+}
+
+/* =========================================================
+   Screens: Login
+   ========================================================= */
+function screenLogin() {
+  const f = ui.form;
+  return `
+    <div class="hero-emo" style="margin-top:32px">🐼🦊🐰</div>
+    <h1 class="center" style="font-size:26px">Healthy Zoo</h1>
+    <p class="center muted" style="margin:-8px 0 4px">ล็อกอินเพื่อดูข้อมูลของคุณ</p>
+    <form class="card col" data-form="login" novalidate>
+      <div class="field"><label for="li-user">Username</label>
+        <input id="li-user" class="input" data-input="username" value="${esc(f.username)}" placeholder="ton_fit" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+      <div class="field"><label for="li-pass">รหัสผ่าน</label>
+        <input id="li-pass" class="input" type="password" data-input="password" value="${esc(f.password)}" autocomplete="current-password"></div>
+      <div id="ob-error" class="error"></div>
+      <button class="btn block" type="submit" ${ui.busy ? 'disabled style="opacity:.7"' : ''}>${ui.busy ? 'กำลังล็อกอิน…' : 'ล็อกอิน'}</button>
+    </form>
+    <p class="center small" style="margin:0">ยังไม่มีบัญชี? <button class="small" style="color:var(--fox);font-weight:500" data-act="go-register">สมัครสมาชิก</button></p>`;
+}
+
+function screenLoadError() {
+  return `
+    <div class="hero-emo" style="margin-top:40px">🙈</div>
+    <h1 class="center" style="font-size:22px">โหลดข้อมูลไม่สำเร็จ</h1>
+    <p class="center muted" style="margin:0">${esc(ui.screen.message)}</p>
+    <div class="col" style="margin-top:auto">
+      <button class="btn block" data-act="retry-load">ลองใหม่</button>
+      <button class="btn ghost block" data-act="logout">ออกจากระบบ</button>
+    </div>`;
 }
 
 function screenOnboard() {
@@ -445,18 +512,34 @@ function screenOnboard() {
         เป้าหมาย "${tg.goal.label}" ${tg.goal.kcalDelta >= 0 ? '+' : '−'}${Math.abs(tg.goal.kcalDelta)} kcal · โปรตีน ${tg.goal.proteinPerKg} g/กก.
         ${tg.floorApplied ? `<br><span class="muted">ปรับเป้าแคลขึ้นเป็นขั้นต่ำ ${tg.floor} kcal เพื่อความปลอดภัย</span>` : ''}</div>
       </section>
+      ${f.mode === 'register' ? `<p class="center small muted" style="margin:0">บัญชี <b>@${esc(normalizeUsername(f.username))}</b> · ข้อมูลทั้งหมดจะเก็บใน cloud</p>` : ''}
+      <div id="ob-error" class="error center"></div>
       <div class="col" style="margin-top:auto">
-        <button class="btn leaf block" data-act="ob-save">${f.editing ? 'บันทึก' : 'เริ่มเลย 🐾'}</button>
+        <button class="btn leaf block" data-act="ob-save" ${ui.busy ? 'disabled style="opacity:.7"' : ''}>${ui.busy ? 'กำลังสร้างบัญชี…' : f.mode === 'edit' ? 'บันทึก' : f.mode === 'register' ? 'สร้างบัญชีและเริ่มเลย 🐾' : 'เริ่มเลย 🐾'}</button>
         <button class="btn ghost block" data-act="ob-back">ย้อนกลับไปแก้ไข</button>
       </div>`;
   }
   const chip = (field, val, label) => `<button class="chip ${String(f[field]) === String(val) ? 'on' : ''}" data-act="ob-set" data-field="${field}" data-v="${val}">${label}</button>`;
   return `
     <header class="topbar">
-      <div><div class="muted small">${f.editing ? 'แก้ไขโปรไฟล์' : 'ยินดีต้อนรับสู่'}</div><h1>${f.editing ? 'ข้อมูลของคุณ' : 'Healthy Zoo 🐾'}</h1></div>
-      ${f.editing ? '<button class="icon-btn" data-act="screen-close" aria-label="ปิด">✕</button>' : ''}
+      <div><div class="muted small">${f.mode === 'edit' ? 'แก้ไขโปรไฟล์' : f.mode === 'register' ? 'สมัครสมาชิก' : 'ยินดีต้อนรับสู่'}</div><h1>${f.mode === 'edit' ? 'ข้อมูลของคุณ' : 'Healthy Zoo 🐾'}</h1></div>
+      ${f.mode === 'edit' ? '<button class="icon-btn" data-act="screen-close" aria-label="ปิด">✕</button>' : ''}
+      ${f.mode === 'register' ? '<button class="icon-btn" data-act="go-login" aria-label="กลับไปหน้าล็อกอิน">‹</button>' : ''}
     </header>
-    ${f.editing ? '' : '<p class="muted" style="margin:-6px 0 0">ตอบไม่กี่ข้อ แล้วเราจะคำนวณแคลอรี่และโปรตีนที่เหมาะกับคุณ</p>'}
+    ${f.mode === 'edit' ? '' : '<p class="muted" style="margin:-6px 0 0">ตอบไม่กี่ข้อ แล้วเราจะคำนวณแคลอรี่และโปรตีนที่เหมาะกับคุณ</p>'}
+
+    ${f.mode === 'register' ? `
+    <section class="card col">
+      <h3 style="font-size:17px">🔑 บัญชีผู้ใช้</h3>
+      <div class="field"><label for="rg-user">Username</label>
+        <input id="rg-user" class="input" data-input="username" value="${esc(f.username)}" placeholder="ton_fit" maxlength="20" autocomplete="username" autocapitalize="none" spellcheck="false">
+        <span class="tiny muted">3–20 ตัว ใช้ a-z, 0-9, _ และ . ได้</span></div>
+      <div class="field"><label for="rg-pass">รหัสผ่าน</label>
+        <input id="rg-pass" class="input" type="password" data-input="password" value="${esc(f.password)}" autocomplete="new-password">
+        <span class="tiny muted">อย่างน้อย 6 ตัวอักษร</span></div>
+      <div class="field"><label for="rg-pass2">ยืนยันรหัสผ่าน</label>
+        <input id="rg-pass2" class="input" type="password" data-input="password2" value="${esc(f.password2)}" autocomplete="new-password"></div>
+    </section>` : ''}
 
     <div class="field"><span class="label">เลือกสัตว์คู่หู</span>
       <div class="choice-grid" style="grid-template-columns:repeat(4,1fr)">
@@ -492,6 +575,12 @@ function screenOnboard() {
 }
 
 function validateForm(f) {
+  if (f.mode === 'register') {
+    const u = normalizeUsername(f.username);
+    if (!USERNAME_RE.test(u)) return 'username ต้องยาว 3–20 ตัว ใช้ได้เฉพาะ a-z, 0-9, _ และ .';
+    if (String(f.password).length < 6) return 'รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร';
+    if (f.password !== f.password2) return 'รหัสผ่านทั้งสองช่องไม่ตรงกัน';
+  }
   const age = Number(f.age), w = Number(f.weight), h = Number(f.height);
   if (!f.age || age < 13 || age > 100) return 'กรอกอายุ 13–100 ปี';
   if (!f.weight || w < 30 || w > 250) return 'กรอกน้ำหนัก 30–250 กก.';
@@ -848,8 +937,8 @@ function sheetExit() {
 
 function sheetReset() {
   return `
-    <div class="center"><div style="font-size:48px">🙀</div><h3>ล้างข้อมูลทั้งหมด?</h3>
-    <p class="small muted" style="margin:4px 0 0">โปรไฟล์ บันทึกอาหาร และการออกกำลังทั้งหมดในเครื่องนี้จะถูกลบถาวร กู้คืนไม่ได้</p></div>
+    <div class="center"><div style="font-size:48px">🙀</div><h3>ลบบันทึกทั้งหมด?</h3>
+    <p class="small muted" style="margin:4px 0 0">บันทึกอาหาร การออกกำลัง และอาหารใน "ของฉัน" ทั้งหมดในบัญชีนี้จะถูกลบถาวรจาก cloud กู้คืนไม่ได้ (บัญชีและโปรไฟล์ยังอยู่)</p></div>
     <button class="btn block" data-act="reset-do" style="background:var(--berry);box-shadow:0 4px 0 #B03A5C">ลบทั้งหมด</button>
     <button class="btn ghost block" data-act="sheet-close">ยกเลิก</button>`;
 }
@@ -865,10 +954,18 @@ const screenRoot = $('#screen-root');
 const sheetRoot = $('#sheet-root');
 
 function render() {
-  if (!db.profile) {
+  if (ui.booting) {
+    tabbar.hidden = true;
+    app.innerHTML = '<div class="center" style="margin-top:35vh"><div class="hero-emo">🐾</div><p class="muted">กำลังโหลด…</p></div>';
+    return;
+  }
+  if (!currentUser || !db.profile) {
     app.innerHTML = '';
     tabbar.hidden = true;
-    if (!ui.screen) { ui.form = defaultForm(); ui.screen = { type: 'onboard' }; }
+    if (!ui.screen) {
+      if (!currentUser) { ui.form = { username: '', password: '' }; ui.screen = { type: 'login' }; }
+      else { ui.form = defaultForm('setup'); ui.screen = { type: 'onboard' }; }
+    }
     renderOverlay(true);
     return;
   }
@@ -880,7 +977,7 @@ function render() {
 
 function renderScreen(animate = false) {
   if (!ui.screen) { screenRoot.innerHTML = ''; document.body.style.overflow = ui.sheet ? 'hidden' : ''; return; }
-  const fns = { onboard: screenOnboard, program: screenProgram, session: screenSession, summary: screenSummary };
+  const fns = { login: screenLogin, loadError: screenLoadError, onboard: screenOnboard, program: screenProgram, session: screenSession, summary: screenSummary };
   screenRoot.innerHTML = `<div class="screen" style="${animate ? '' : 'animation:none'}"><div class="inner">${fns[ui.screen.type]()}</div></div>`;
   document.body.style.overflow = 'hidden';
 }
@@ -925,7 +1022,7 @@ function addFoodItem(meal, food, qty) {
   const d = ensureDay(ui.date);
   d.meals[meal].push({ uid: uid(), name: food.name, unit: food.unit, kcal: Number(food.kcal) || 0, p: Number(food.p) || 0, c: Number(food.c) || 0, f: Number(food.f) || 0, qty });
   if (food.id) db.recent = [food.id, ...db.recent.filter((x) => x !== food.id)].slice(0, 12);
-  save();
+  save({ meta: Boolean(food.id), days: [ui.date] });
   render();
 }
 
@@ -967,12 +1064,12 @@ const actions = {
   'del-food'(el) {
     const d = ensureDay(ui.date);
     d.meals[el.dataset.meal] = d.meals[el.dataset.meal].filter((x) => x.uid !== el.dataset.id);
-    save(); render(); toast('ลบแล้ว');
+    save({ days: [ui.date] }); render(); toast('ลบแล้ว');
   },
   'del-workout'(el) {
     const d = ensureDay(ui.date);
     d.workouts = d.workouts.filter((x) => x.uid !== el.dataset.id);
-    save(); render(); toast('ลบแล้ว');
+    save({ days: [ui.date] }); render(); toast('ลบแล้ว');
   },
 
   'prog-tag'(el) { ui.progTag = el.dataset.v; render(); },
@@ -988,7 +1085,7 @@ const actions = {
   'summary-save'() {
     const s = ui.screen;
     ensureDay(todayKey()).workouts.push({ uid: uid(), name: s.prog.name, emoji: s.prog.emoji, min: s.min, kcal: s.kcal, at: Date.now() });
-    save();
+    save({ days: [todayKey()] });
     ui.date = todayKey(); ui.tab = 'home';
     closeScreen();
     toast(`บันทึก ${s.prog.name} แล้ว 🎉`);
@@ -1002,7 +1099,7 @@ const actions = {
     const a = QUICK_ACTIVITIES.find((x) => x.id === sh.act);
     const kcal = Math.round(a.met * db.profile.weight * (sh.min / 60));
     ensureDay(todayKey()).workouts.push({ uid: uid(), name: a.label, emoji: a.emoji, min: sh.min, kcal, at: Date.now() });
-    save(); closeSheet(); render();
+    save({ days: [todayKey()] }); closeSheet(); render();
     toast(`บันทึก ${a.label} ${sh.min} นาทีแล้ว`);
   },
 
@@ -1016,29 +1113,137 @@ const actions = {
     ui.form.step = 2; renderScreen(); screenRoot.querySelector('.screen').scrollTop = 0;
   },
   'ob-back'() { ui.form.step = 1; renderScreen(); },
-  'ob-save'() {
+  async 'ob-save'() {
     const f = ui.form;
-    db.profile = { name: f.name.trim(), buddy: f.buddy, sex: f.sex, age: Number(f.age), weight: Number(f.weight), height: Number(f.height), activity: f.activity, goal: f.goal };
-    save();
-    const wasEditing = f.editing;
+    if (ui.busy) return;
+    const profile = { name: f.name.trim(), buddy: f.buddy, sex: f.sex, age: Number(f.age), weight: Number(f.weight), height: Number(f.height), activity: f.activity, goal: f.goal };
+    if (f.mode === 'register') { await registerAccount(f, profile); return; }
+    db.profile = profile;
+    save({ meta: true });
     ui.form = null;
     closeScreen();
-    toast(wasEditing ? 'บันทึกโปรไฟล์แล้ว' : `${buddyOf().emoji} ยินดีที่ได้รู้จัก!`);
+    toast(f.mode === 'edit' ? 'บันทึกโปรไฟล์แล้ว' : `${buddyOf().emoji} ยินดีที่ได้รู้จัก!`);
   },
-  'edit-profile'() { ui.form = defaultForm(); ui.screen = { type: 'onboard' }; renderScreen(true); },
+  'go-register'() { ui.form = defaultForm('register'); ui.screen = { type: 'onboard' }; renderScreen(true); },
+  'go-login'() { ui.form = { username: ui.form?.username || '', password: '' }; ui.screen = { type: 'login' }; renderScreen(true); },
+  async logout() {
+    if (ui.session) { stopSessionTimer(); ui.session = null; }
+    await flushSync();
+    await logout();
+    toast('ออกจากระบบแล้ว');
+  },
+  'retry-load'() { if (authUser) loadAccount(authUser); },
+  'edit-profile'() { ui.form = defaultForm('edit'); ui.screen = { type: 'onboard' }; renderScreen(true); },
   'screen-close'() { closeScreen(); },
   'sheet-close'() {
     if (ui.sheet?.type === 'exit') { actions['sess-resume'](); return; }
     closeSheet();
   },
   'reset-ask'() { openSheet({ type: 'reset' }); },
-  'reset-do'() {
-    localStorage.removeItem(STORE_KEY);
-    Object.assign(db, { profile: null, days: {}, customFoods: [], recent: [], settings: { countBurned: true, sound: true } });
-    ui.sheet = null; ui.screen = null; ui.tab = 'home'; ui.date = todayKey();
+  async 'reset-do'() {
+    const keys = Object.keys(db.days);
+    db.days = {}; db.customFoods = []; db.recent = [];
+    pending.days.clear();
+    ui.sheet = null; ui.tab = 'home'; ui.date = todayKey();
     renderSheet(); render();
+    try {
+      await deleteDays(currentUser.uid, keys);
+      await saveMeta(currentUser.uid, currentUser.username, db);
+      toast('ลบบันทึกทั้งหมดแล้ว');
+    } catch (err) {
+      console.error(err);
+      toast(`ลบไม่สำเร็จ: ${authErrorMessage(err)}`);
+    }
   },
 };
+
+/* =========================================================
+   Account: login / register / load
+   ========================================================= */
+let authUser = null;
+
+async function doLogin() {
+  const f = ui.form;
+  const err = $('#ob-error');
+  const u = normalizeUsername(f.username);
+  if (!USERNAME_RE.test(u)) { err.textContent = 'กรอก username ให้ถูกต้อง (a-z, 0-9, _ และ . ยาว 3–20 ตัว)'; return; }
+  if (!f.password) { err.textContent = 'กรอกรหัสผ่าน'; return; }
+  ui.busy = true; renderScreen();
+  try {
+    await login(u, f.password); // สำเร็จแล้ว watchAuth จะโหลดข้อมูลต่อเอง
+  } catch (e) {
+    ui.busy = false; renderScreen();
+    $('#ob-error').textContent = authErrorMessage(e);
+  }
+}
+
+async function registerAccount(f, profile) {
+  ui.busy = true; ui.registering = true; renderScreen();
+  try {
+    // ถ้าสร้างบัญชีสำเร็จแล้วแต่บันทึกข้อมูลพลาด กดซ้ำจะไม่สร้างบัญชีใหม่
+    if (!currentUser) {
+      const user = await register(f.username, f.password);
+      authUser = user;
+      currentUser = { uid: user.uid, username: normalizeUsername(f.username) };
+    }
+    const legacy = readLegacy();
+    Object.assign(db, freshDB(), { profile });
+    if (legacy) {
+      db.days = legacy.days || {};
+      db.customFoods = legacy.customFoods || [];
+      db.recent = legacy.recent || [];
+      db.settings = { ...defaultSettings(), ...(legacy.settings || {}) };
+    }
+    await saveMeta(currentUser.uid, currentUser.username, db, true);
+    if (legacy) { await saveDays(currentUser.uid, db.days); localStorage.removeItem(LEGACY_KEY); }
+    ui.busy = false; ui.registering = false; ui.form = null; ui.tab = 'home'; ui.date = todayKey();
+    closeScreen();
+    toast(legacy ? `${buddyOf().emoji} สร้างบัญชีและย้ายข้อมูลเดิมขึ้น cloud แล้ว` : `${buddyOf().emoji} ยินดีที่ได้รู้จัก!`);
+  } catch (e) {
+    console.error(e);
+    ui.busy = false; ui.registering = false;
+    renderScreen();
+    $('#ob-error').textContent = authErrorMessage(e);
+  }
+}
+
+async function loadAccount(user) {
+  authUser = user;
+  currentUser = { uid: user.uid, username: usernameFromEmail(user.email) };
+  try {
+    const data = await loadUserData(user.uid);
+    Object.assign(db, freshDB(), data, { settings: { ...defaultSettings(), ...(data.settings || {}) } });
+    ui.screen = null;
+  } catch (err) {
+    console.error(err);
+    Object.assign(db, freshDB());
+    ui.screen = { type: 'loadError', message: authErrorMessage(err) };
+  }
+  ui.booting = false; ui.busy = false; ui.form = null; ui.sheet = null;
+  ui.tab = 'home'; ui.date = todayKey();
+  renderSheet(); renderScreen(true); render();
+}
+
+watchAuth((user) => {
+  if (!user) {
+    authUser = null; currentUser = null;
+    Object.assign(db, freshDB());
+    pending.meta = false; pending.days.clear();
+    ui.booting = false; ui.busy = false; ui.screen = null; ui.sheet = null; ui.form = null;
+    renderSheet(); render();
+    return;
+  }
+  if (ui.registering || currentUser?.uid === user.uid) return;
+  loadAccount(user);
+});
+
+document.addEventListener('submit', (e) => {
+  if (e.target.dataset.form === 'login') { e.preventDefault(); doLogin(); }
+});
+
+// ส่งข้อมูลที่ค้างอยู่ขึ้น cloud ก่อนปิดหรือสลับแอป
+window.addEventListener('pagehide', () => { flushSync(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSync(); });
 
 document.addEventListener('click', (e) => {
   const tabBtn = e.target.closest('[data-tab]');
@@ -1071,7 +1276,7 @@ document.addEventListener('change', (e) => {
   const key = e.target.dataset.setting;
   if (!key) return;
   db.settings[key] = e.target.checked;
-  save();
+  save({ meta: true });
   render();
 });
 

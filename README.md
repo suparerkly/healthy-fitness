@@ -9,7 +9,8 @@
 - โปรแกรมออกกำลัง 7 แบบ (หมี กระต่าย แมว จิงโจ้ กอริลลา กบ ปู) บอกจำนวนนาที ท่า เซต
 - โหมดออกกำลังแบบนำทีละท่า มีจับเวลา พัก เสียงเตือน และสรุปแคลที่เผาผลาญ
 - บันทึกกิจกรรมอื่น (เดิน วิ่ง ปั่น ว่ายน้ำ ฯลฯ) คำนวณจากค่า MET
-- ข้อมูลเก็บใน localStorage ของเครื่อง · ติดตั้งเป็นแอป (PWA) และใช้ออฟไลน์ได้
+- สมัครสมาชิก / ล็อกอินด้วย username + password · ข้อมูลทั้งหมดเก็บใน Firebase (Cloud Firestore) ใช้ได้หลายเครื่อง
+- ติดตั้งเป็นแอป (PWA) และใช้ออฟไลน์ได้ ข้อมูลที่บันทึกตอนออฟไลน์จะซิงก์ขึ้น cloud เมื่อกลับมาออนไลน์
 
 ## สูตรที่ใช้
 - BMR (Mifflin-St Jeor): ชาย `10W + 6.25H − 5A + 5`, หญิง `10W + 6.25H − 5A − 161`
@@ -17,6 +18,21 @@
 - เป้าแคล = TDEE − 500 (ลดไขมัน) / ±0 (รักษา) / +300 (เพิ่มกล้าม) ขั้นต่ำ 1,500 (ชาย) / 1,200 (หญิง)
 - โปรตีน 1.8 / 1.4 / 2.0 g ต่อน้ำหนักตัว 1 กก. · ไขมัน 25% ของแคล · คาร์บ = ส่วนที่เหลือ
 - แคลที่เผาผลาญ = MET × น้ำหนัก (กก.) × ชั่วโมง
+
+## ตั้งค่า Firebase (ทำครั้งเดียว)
+ค่า config อยู่ใน `js/firebase.js` (โปรเจกต์ `healthy-fitness-2c475`) ต้องตั้งค่าใน [Firebase Console](https://console.firebase.google.com/) อีก 3 อย่าง:
+
+1. **Authentication → Sign-in method** → เปิด **Email/Password**
+2. **Authentication → Settings → Authorized domains** → เพิ่ม `<username>.github.io`
+3. **Firestore Database** → สร้างฐานข้อมูล แล้วไปที่แท็บ **Rules** วางเนื้อหาจากไฟล์ `firestore.rules` แล้วกด Publish
+
+username จะถูกแปลงเป็นอีเมลภายใน `<username>@users.healthyzoo.app` เพื่อใช้กับ Firebase Auth (จึงยังไม่มีระบบลืมรหัสผ่าน)
+
+โครงสร้างข้อมูล
+```
+users/{uid}              username, profile, settings, customFoods, recent
+users/{uid}/days/{date}  meals, workouts   (date = YYYY-MM-DD)
+```
 
 ## รันในเครื่อง
 เป็นไฟล์ static ล้วน ไม่ต้อง build แต่ต้องเปิดผ่านเว็บเซิร์ฟเวอร์ (เพราะใช้ ES modules)
